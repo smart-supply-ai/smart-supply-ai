@@ -53,3 +53,7 @@ CREATE TABLE IF NOT EXISTS supply_chain_data (
     shipping_date TIMESTAMP,
     shipping_mode TEXT
 );
+-- À ajouter à la fin du fichier 01_create_tables.sql
+CREATE VIEW v_supply_chain_analysis AS 
+SELECT *, (shipping_date - order_date) AS lead_time 
+FROM supply_chain_data;
