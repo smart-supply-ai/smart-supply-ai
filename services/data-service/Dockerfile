@@ -2,7 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir fastapi==0.115.8 uvicorn[standard]==0.30.6
+# On ajoute psycopg[binary] à la liste des courses
+RUN pip install --no-cache-dir \
+    fastapi==0.115.8 \
+    uvicorn[standard]==0.30.6 \
+    psycopg[binary]
 
 COPY main.py /app/main.py
 
