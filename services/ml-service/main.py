@@ -3,23 +3,48 @@ import time
 from typing import Any, Dict, Optional
 
 import httpx
-from fastapi import FastAPI
+import joblib
+import pandas as pd
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
-app = FastAPI(title="ML Service", version="0.1.0")
+app = FastAPI(title="ML Service", version="0.2.0")
 
 DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://data-service:8000")
+MODEL_PATH = "/app/model.joblib"
+ENCODERS_PATH = "/app/encoders.joblib"
 
+# Features utilisées par le modèle
+FEATURES = [
+    "days_for_shipping_scheduled",  # délai prévu → connu à la commande
+    "shipping_mode",
+    "order_status",
+    "customer_segment",
+    "market",
+    "order_region",
+    "department_name",
+    "order_item_quantity",
+    "sales",
+    "benefit_per_order",
+    "category_name",
+]
+TARGET = "late_delivery_risk"
+CATEGORICAL = ["shipping_mode", "order_status", "customer_segment", "market", "order_region", "department_name", "category_name"]
+
+# Stockage en mémoire
+model: Optional[RandomForestClassifier] = None
+encoders: Dict[str, LabelEncoder] = {}
+
+
+# ── Utilitaires ──────────────────────────────────────────────────────────────
 
 def wait_for_dependency(url: str, timeout_s: int = 60) -> None:
-
-    """
-    Simple blocking wait so the service doesn't start "ready" before dependencies are up.
-    """
-
     deadline = time.time() + timeout_s
     last_err: Optional[str] = None
-
     while time.time() < deadline:
         try:
             with httpx.Client(timeout=2.0) as client:
@@ -30,14 +55,56 @@ def wait_for_dependency(url: str, timeout_s: int = 60) -> None:
         except Exception as e:
             last_err = str(e)
         time.sleep(1)
-
     raise RuntimeError(f"Dependency not ready: {url} (last error: {last_err})")
 
 
+def fetch_all_data() -> pd.DataFrame:
+    """Récupère toutes les données depuis data-service."""
+    with httpx.Client(timeout=60.0) as client:
+        r = client.get(f"{DATA_SERVICE_URL}/data/all")
+        r.raise_for_status()
+    return pd.DataFrame(r.json()["data"])
+
+
+def preprocess(df: pd.DataFrame, fit: bool = False) -> pd.DataFrame:
+    """
+    Encode les colonnes catégorielles.
+    fit=True  → on apprend les encodeurs (à l'entraînement)
+    fit=False → on réutilise les encodeurs existants (à la prédiction)
+    """
+    df = df.copy()
+    for col in CATEGORICAL:
+        if fit:
+            le = LabelEncoder()
+            df[col] = le.fit_transform(df[col].astype(str))
+            encoders[col] = le
+        else:
+            le = encoders[col]
+            # Gère les valeurs inconnues avec la classe la plus fréquente
+            df[col] = df[col].astype(str).map(
+                lambda x, le=le: le.transform([x])[0]
+                if x in le.classes_
+                else 0
+            )
+    return df
+
+
+# ── Startup ──────────────────────────────────────────────────────────────────
+
 @app.on_event("startup")
 def on_startup():
+    global model, encoders
     wait_for_dependency(DATA_SERVICE_URL, timeout_s=90)
+    # Charge le modèle s'il existe déjà
+    if os.path.exists(MODEL_PATH) and os.path.exists(ENCODERS_PATH):
+        model = joblib.load(MODEL_PATH)
+        encoders = joblib.load(ENCODERS_PATH)
+        print("✅ Modèle chargé depuis le disque")
+    else:
+        print("ℹ️  Aucun modèle trouvé — lance POST /train pour entraîner")
 
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
@@ -46,21 +113,96 @@ def health():
 
 @app.get("/ready")
 def ready():
-    # Check if model loaded, etc.
-    return {"service": "ml-service", "ready": True, "data_service": DATA_SERVICE_URL}
+    return {
+        "service": "ml-service",
+        "model_loaded": model is not None,
+        "data_service": DATA_SERVICE_URL,
+    }
+
+
+@app.post("/train")
+def train():
+    """Entraîne le modèle sur toutes les données disponibles."""
+    global model, encoders
+
+    # 1. Récupération des données
+    try:
+        df = fetch_all_data()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Erreur data-service : {e}")
+
+    # 2. Nettoyage
+    df = df[FEATURES + [TARGET]].dropna()
+    if len(df) < 100:
+        raise HTTPException(status_code=400, detail="Pas assez de données pour entraîner")
+
+    # 3. Preprocessing
+    df = preprocess(df, fit=True)
+    X = df[FEATURES]
+    y = df[TARGET]
+
+    # 4. Split train/test
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    # 5. Entraînement
+    clf = RandomForestClassifier(
+        n_estimators=200,        # plus d'arbres = plus stable
+        max_depth=15,            # évite l'overfitting
+        min_samples_split=10,    # noeuds plus robustes
+        min_samples_leaf=4,      # feuilles plus robustes
+        class_weight="balanced", # gère le déséquilibre des classes
+        random_state=42,
+        n_jobs=-1
+    )
+    clf.fit(X_train, y_train)
+
+    # 6. Évaluation
+    y_pred = clf.predict(X_test)
+    report = classification_report(y_test, y_pred, output_dict=True)
+
+    # 7. Sauvegarde
+    model = clf
+    joblib.dump(model, MODEL_PATH)
+    joblib.dump(encoders, ENCODERS_PATH)
+
+    return {
+        "status": "success",
+        "rows_trained": len(X_train),
+        "rows_tested": len(X_test),
+        "accuracy": round(report["accuracy"], 4),
+        "precision": round(report["1"]["precision"], 4),
+        "recall": round(report["1"]["recall"], 4),
+        "f1_score": round(report["1"]["f1-score"], 4),
+    }
 
 
 class PredictRequest(BaseModel):
-    entity_id: str = Field(..., examples=["ORDER_123"])
-    context: Dict[str, Any] = Field(default_factory=dict)
+    days_for_shipping_real: int = Field(..., examples=[3])
+    days_for_shipping_scheduled: int = Field(..., examples=[4])
+    shipping_mode: str = Field(..., examples=["Standard Class"])
+    order_status: str = Field(..., examples=["PENDING"])
+    customer_segment: str = Field(..., examples=["Consumer"])
+    market: str = Field(..., examples=["Europe"])
+    order_item_quantity: int = Field(..., examples=[2])
+    sales: float = Field(..., examples=[199.99])
+    benefit_per_order: float = Field(..., examples=[35.0])
+    category_name: str = Field(..., examples=["Cleats"])
 
 
 @app.post("/predict")
 def predict(req: PredictRequest):
-    # Dummy prediction
+    if model is None:
+        raise HTTPException(status_code=503, detail="Modèle non entraîné — lance POST /train d'abord")
+
+    df = pd.DataFrame([req.model_dump()])
+    df = preprocess(df, fit=False)
+    prediction = int(model.predict(df[FEATURES])[0])
+    probability = float(model.predict_proba(df[FEATURES])[0][1])
+
     return {
-        "service": "ml-service",
-        "entity_id": req.entity_id,
-        "prediction": 3.14,
-        "model_version": "dummy-0.1.0",
+        "late_delivery_risk": prediction,
+        "probability": round(probability, 4),
+        "risk_level": "HIGH" if probability > 0.7 else "MEDIUM" if probability > 0.4 else "LOW",
     }
