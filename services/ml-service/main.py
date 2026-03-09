@@ -15,8 +15,8 @@ from sklearn.preprocessing import LabelEncoder
 app = FastAPI(title="ML Service", version="0.2.0")
 
 DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://data-service:8000")
-MODEL_PATH = "/app/model.joblib"
-ENCODERS_PATH = "/app/encoders.joblib"
+MODEL_PATH = "/app/models/model.joblib"
+ENCODERS_PATH = "/app/models/encoders.joblib"
 
 # Features utilisées par le modèle
 FEATURES = [
@@ -94,6 +94,7 @@ def preprocess(df: pd.DataFrame, fit: bool = False) -> pd.DataFrame:
 @app.on_event("startup")
 def on_startup():
     global model, encoders
+    os.makedirs("/app/models", exist_ok=True)
     wait_for_dependency(DATA_SERVICE_URL, timeout_s=90)
     # Charge le modèle s'il existe déjà
     if os.path.exists(MODEL_PATH) and os.path.exists(ENCODERS_PATH):
@@ -179,12 +180,13 @@ def train():
 
 
 class PredictRequest(BaseModel):
-    days_for_shipping_real: int = Field(..., examples=[3])
     days_for_shipping_scheduled: int = Field(..., examples=[4])
     shipping_mode: str = Field(..., examples=["Standard Class"])
     order_status: str = Field(..., examples=["PENDING"])
     customer_segment: str = Field(..., examples=["Consumer"])
     market: str = Field(..., examples=["Europe"])
+    order_region: str = Field(..., examples=["Western Europe"])
+    department_name: str = Field(..., examples=["Fitness"])
     order_item_quantity: int = Field(..., examples=[2])
     sales: float = Field(..., examples=[199.99])
     benefit_per_order: float = Field(..., examples=[35.0])
