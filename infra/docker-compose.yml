@@ -49,6 +49,8 @@ services:
         condition: service_started
     ports:
       - "8002:8000"
+    volumes:
+      - ml_models:/app/models
 
   alert-service:
     build:
@@ -70,3 +72,4 @@ services:
 
 volumes:
   pgdata:
+  ml_models:

@@ -1,12 +1,15 @@
-import os
-import psycopg
 from fastapi import FastAPI
+import psycopg
+import os
 
 app = FastAPI()
 
-# Utilise DATABASE_URL injecté par Docker
-CONN_STR = os.getenv("DATABASE_URL", 
-    "postgresql+psycopg://postgres:postgres@db:5432/smart_supply")
+DB_USER = os.getenv("POSTGRES_USER", "postgres")
+DB_PASS = os.getenv("POSTGRES_PASSWORD", "postgres")
+DB_NAME = os.getenv("POSTGRES_DB", "smart_supply")
+DB_HOST = "db"
+
+CONN_STR = f"host={DB_HOST} dbname={DB_NAME} user={DB_USER} password={DB_PASS}" 
 
 @app.get("/")
 def read_root():
