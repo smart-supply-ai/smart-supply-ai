@@ -1,0 +1,14 @@
+services:
+  frontend:
+    build:
+      context: .
+    container_name: smart-supply-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    networks:
+      - smart-supply-net
+
+networks:
+  smart-supply-net:
+    external: true

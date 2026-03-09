@@ -21,6 +21,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks: [smart-supply-net]
 
   data-service:
     build:
@@ -35,6 +36,7 @@ services:
         condition: service_healthy
     ports:
       - "8001:8000"
+    networks: [smart-supply-net]
 
   ml-service:
     build:
@@ -51,6 +53,7 @@ services:
       - "8002:8000"
     volumes:
       - ml_models:/app/models
+    networks: [smart-supply-net]
 
   alert-service:
     build:
@@ -69,7 +72,12 @@ services:
         condition: service_started
     ports:
       - "8003:8000"
+    networks: [smart-supply-net]
 
 volumes:
   pgdata:
   ml_models:
+
+networks:
+  smart-supply-net:
+    name: smart-supply-net
