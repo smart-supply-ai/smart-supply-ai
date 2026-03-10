@@ -96,6 +96,8 @@ db/dumps/
 *.dump
 *.sqlite
 *.db
+!db/init/01_create_tables.sql
+!db/init/02_load_data.sql
 
 ########################################
 # ML / DATA SCIENCE

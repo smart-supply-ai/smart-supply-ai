@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { runPrediction } from "./services/alertService";
 
 // ─────────────────────────────────────────────
 // MOCK DATA
+// Used as a fallback while the real API isn't connected yet.
 // ─────────────────────────────────────────────
 const MOCK_ORDERS = [
   {
@@ -106,6 +108,7 @@ function Header() {
 
 // ─────────────────────────────────────────────
 // COMPONENT: SummaryCard
+// Displays one KPI. Receives label, value, icon, delta as props.
 // ─────────────────────────────────────────────
 function SummaryCard({ label, value, icon, delta }) {
   return (
@@ -120,6 +123,7 @@ function SummaryCard({ label, value, icon, delta }) {
 
 // ─────────────────────────────────────────────
 // COMPONENT: SummaryBar
+// Lays out four SummaryCards in a grid row.
 // ─────────────────────────────────────────────
 function SummaryBar() {
   return (
@@ -133,6 +137,7 @@ function SummaryBar() {
 
 // ─────────────────────────────────────────────
 // COMPONENT: RiskBadge
+// Color-coded pill driven by the status string.
 // ─────────────────────────────────────────────
 function RiskBadge({ status }) {
   const colors = {
@@ -158,6 +163,7 @@ function RiskBadge({ status }) {
 
 // ─────────────────────────────────────────────
 // COMPONENT: RiskBar
+// Thin progress bar; colour shifts green → yellow → orange → red by score.
 // ─────────────────────────────────────────────
 function RiskBar({ score }) {
   const color =
@@ -179,6 +185,7 @@ function RiskBar({ score }) {
 
 // ─────────────────────────────────────────────
 // COMPONENT: OrderRow
+// One row in the flagged-orders table.
 // ─────────────────────────────────────────────
 function OrderRow({ order }) {
   return (
@@ -215,6 +222,7 @@ function OrderRow({ order }) {
 
 // ─────────────────────────────────────────────
 // COMPONENT: OrdersTable
+// Full results table. Shows empty state before first run.
 // ─────────────────────────────────────────────
 function OrdersTable({ orders }) {
   if (orders.length === 0) {
@@ -253,29 +261,48 @@ function OrdersTable({ orders }) {
   );
 }
 
-// ─────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
 // COMPONENT: PredictionPanel
-// ─────────────────────────────────────────────
+// This component owns the async state machine for the prediction flow.
+// It delegates the actual API call to alertService.js.
+// ────────────────────────────────────────────────────────────────────────────
 function PredictionPanel() {
   const [orders, setOrders] = useState([]);
+  const [ordersAnalyzed, setOrdersAnalyzed] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   const [hasRun, setHasRun] = useState(false);
 
-  function runPrediction() {
+  async function handleRunPrediction() {
     setLoading(true);
+    setError(null);
     setOrders([]);
-    // Simulates an async API call with a 1.8s delay
-    setTimeout(() => {
-      const sorted = [...MOCK_ORDERS].sort((a, b) => b.risk - a.risk);
-      setOrders(sorted);
-      setLoading(false);
+    setOrdersAnalyzed(0);
+
+    try {
+      const { orders: flagged, ordersAnalyzed: analyzed } =
+        await runPrediction();
+      setOrders(flagged);
+      setOrdersAnalyzed(analyzed);
       setHasRun(true);
-    }, 1800);
+    } catch (err) {
+      if (import.meta.env.DEV) {
+        console.warn("API unavailable — using mock data:", err.message);
+        const sorted = [...MOCK_ORDERS].sort((a, b) => b.risk - a.risk);
+        setOrders(sorted);
+        setOrdersAnalyzed(sorted.length);
+        setHasRun(true);
+      } else {
+        setError(err.message ?? "An unexpected error occurred.");
+      }
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
     <section style={styles.panel}>
-      {/* Panel header */}
+      {/* Panel header row: title + button */}
       <div style={styles.panelHeader}>
         <div>
           <h2 style={styles.panelTitle}>Late Delivery Predictor</h2>
@@ -285,7 +312,7 @@ function PredictionPanel() {
           </p>
         </div>
         <button
-          onClick={runPrediction}
+          onClick={handleRunPrediction}
           disabled={loading}
           style={{
             ...styles.runButton,
@@ -303,19 +330,33 @@ function PredictionPanel() {
         </button>
       </div>
 
-      {/* Results area */}
-      {hasRun && !loading && (
+      {/* Error banner */}
+      {error && (
+        <div style={styles.errorBanner}>
+          <span style={styles.errorIcon}>⚠</span>
+          <span>{error}</span>
+        </div>
+      )}
+
+      {/* Results count row */}
+      {hasRun && !loading && !error && (
         <div style={styles.resultsHeader}>
           <span style={styles.resultsCount}>
-            {orders.length} orders flagged — sorted by risk
+            {orders.length} of {ordersAnalyzed} orders flagged — sorted by risk
           </span>
           <span style={styles.resultsMeta}>
-            Mock data · replace with live API
+            {import.meta.env.DEV
+              ? "Mock data · replace with live API"
+              : "Live data"}
           </span>
         </div>
       )}
-      <OrdersTable orders={loading ? [] : orders} />
+
+      {/* Loading state */}
       {loading && <p style={styles.loadingText}>Running prediction model…</p>}
+
+      {/* Results table */}
+      {!loading && <OrdersTable orders={orders} />}
     </section>
   );
 }
@@ -345,11 +386,13 @@ export default function Dashboard() {
 const styles = {
   page: {
     minHeight: "100vh",
+    width: "100%",
     background: "#080c14",
     fontFamily: "'DM Sans', 'Segoe UI', sans-serif",
     color: "#e2e8f0",
     position: "relative",
     overflowX: "hidden",
+    boxSizing: "border-box",
   },
   gridOverlay: {
     position: "fixed",
@@ -377,11 +420,7 @@ const styles = {
     borderBottom: "1px solid #1e293b",
     paddingBottom: "24px",
   },
-  headerLeft: {
-    display: "flex",
-    alignItems: "center",
-    gap: "16px",
-  },
+  headerLeft: { display: "flex", alignItems: "center", gap: "16px" },
   logoMark: {
     width: "48px",
     height: "48px",
@@ -403,14 +442,8 @@ const styles = {
     letterSpacing: "-0.02em",
     color: "#f1f5f9",
   },
-  titleAccent: {
-    color: "#818cf8",
-  },
-  appSubtitle: {
-    margin: "2px 0 0",
-    fontSize: "13px",
-    color: "#64748b",
-  },
+  titleAccent: { color: "#818cf8" },
+  appSubtitle: { margin: "2px 0 0", fontSize: "13px", color: "#64748b" },
   headerRight: {
     display: "flex",
     flexDirection: "column",
@@ -441,12 +474,8 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: "4px",
-    transition: "border-color 0.2s",
   },
-  cardIcon: {
-    fontSize: "22px",
-    marginBottom: "4px",
-  },
+  cardIcon: { fontSize: "22px", marginBottom: "4px" },
   cardValue: {
     fontSize: "28px",
     fontWeight: "700",
@@ -454,16 +483,8 @@ const styles = {
     letterSpacing: "-0.03em",
     fontFamily: "'Courier New', monospace",
   },
-  cardLabel: {
-    fontSize: "13px",
-    color: "#64748b",
-    fontWeight: "500",
-  },
-  cardDelta: {
-    fontSize: "12px",
-    color: "#475569",
-    marginTop: "2px",
-  },
+  cardLabel: { fontSize: "13px", color: "#64748b", fontWeight: "500" },
+  cardDelta: { fontSize: "12px", color: "#475569", marginTop: "2px" },
   panel: {
     background: "#0f172a",
     border: "1px solid #1e293b",
@@ -500,15 +521,10 @@ const styles = {
     fontSize: "14px",
     fontWeight: "600",
     letterSpacing: "0.01em",
-    transition: "transform 0.15s, box-shadow 0.15s",
     boxShadow: "0 4px 20px rgba(99,102,241,0.35)",
     flexShrink: 0,
   },
-  buttonInner: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-  },
+  buttonInner: { display: "flex", alignItems: "center", gap: "8px" },
   spinner: {
     display: "inline-block",
     width: "12px",
@@ -518,6 +534,18 @@ const styles = {
     borderRadius: "50%",
     animation: "spin 0.8s linear infinite",
   },
+  errorBanner: {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    background: "#ff1e1e18",
+    border: "1px solid #ff4d4d44",
+    borderRadius: "10px",
+    padding: "12px 16px",
+    color: "#ff6b6b",
+    fontSize: "13px",
+  },
+  errorIcon: { fontSize: "16px", flexShrink: 0 },
   resultsHeader: {
     display: "flex",
     justifyContent: "space-between",
@@ -525,11 +553,7 @@ const styles = {
     padding: "8px 0",
     borderTop: "1px solid #1e293b",
   },
-  resultsCount: {
-    fontSize: "13px",
-    color: "#94a3b8",
-    fontWeight: "600",
-  },
+  resultsCount: { fontSize: "13px", color: "#94a3b8", fontWeight: "600" },
   resultsMeta: {
     fontSize: "11px",
     color: "#334155",
@@ -540,11 +564,7 @@ const styles = {
     borderRadius: "10px",
     border: "1px solid #1e293b",
   },
-  table: {
-    width: "100%",
-    borderCollapse: "collapse",
-    fontSize: "13px",
-  },
+  table: { width: "100%", borderCollapse: "collapse", fontSize: "13px" },
   th: {
     background: "#0a0f1e",
     padding: "12px 16px",
@@ -557,19 +577,9 @@ const styles = {
     borderBottom: "1px solid #1e293b",
     whiteSpace: "nowrap",
   },
-  tableRow: {
-    borderBottom: "1px solid #131c2e",
-    transition: "background 0.15s",
-  },
-  td: {
-    padding: "14px 16px",
-    color: "#cbd5e1",
-    verticalAlign: "middle",
-  },
-  monoText: {
-    fontFamily: "'Courier New', monospace",
-    fontSize: "12px",
-  },
+  tableRow: { borderBottom: "1px solid #131c2e" },
+  td: { padding: "14px 16px", color: "#cbd5e1", verticalAlign: "middle" },
+  monoText: { fontFamily: "'Courier New', monospace", fontSize: "12px" },
   badge: {
     display: "inline-block",
     padding: "3px 10px",
@@ -604,7 +614,6 @@ const styles = {
     fontSize: "13px",
     fontFamily: "'Courier New', monospace",
     padding: "20px 0",
-    animation: "pulse 1.5s ease-in-out infinite",
   },
   footer: {
     textAlign: "center",

@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import httpx
 import joblib
@@ -18,9 +18,8 @@ DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://data-service:8000")
 MODEL_PATH = "/app/models/model.joblib"
 ENCODERS_PATH = "/app/models/encoders.joblib"
 
-# Features utilisées par le modèle
 FEATURES = [
-    "days_for_shipping_scheduled",  # délai prévu → connu à la commande
+    "days_for_shipping_scheduled",
     "shipping_mode",
     "order_status",
     "customer_segment",
@@ -35,7 +34,6 @@ FEATURES = [
 TARGET = "late_delivery_risk"
 CATEGORICAL = ["shipping_mode", "order_status", "customer_segment", "market", "order_region", "department_name", "category_name"]
 
-# Stockage en mémoire
 model: Optional[RandomForestClassifier] = None
 encoders: Dict[str, LabelEncoder] = {}
 
@@ -102,7 +100,14 @@ def on_startup():
         encoders = joblib.load(ENCODERS_PATH)
         print("✅ Modèle chargé depuis le disque")
     else:
-        print("ℹ️  Aucun modèle trouvé — lance POST /train pour entraîner")
+        print("ℹ️  Aucun modèle trouvé — entraînement automatique en cours...")
+        try:
+            result = train()
+            print(f"✅ Modèle entraîné automatiquement — accuracy: {result['accuracy']}")
+        except Exception as e:
+            # Non-fatal: the service starts anyway, /predict will return 503
+            # until the model is trained manually via POST /train.
+            print(f"⚠️  Entraînement automatique échoué: {e}")
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -178,33 +183,76 @@ def train():
         "f1_score": round(report["1"]["f1-score"], 4),
     }
 
+def risk_label(probability: float) -> str:
+    """Mirrors the thresholds used in the train/predict logic."""
+    if probability > 0.7:
+        return "HIGH"
+    if probability > 0.4:
+        return "MEDIUM"
+    return "LOW"
 
-class PredictRequest(BaseModel):
-    days_for_shipping_scheduled: int = Field(..., examples=[4])
-    shipping_mode: str = Field(..., examples=["Standard Class"])
-    order_status: str = Field(..., examples=["PENDING"])
-    customer_segment: str = Field(..., examples=["Consumer"])
-    market: str = Field(..., examples=["Europe"])
-    order_region: str = Field(..., examples=["Western Europe"])
-    department_name: str = Field(..., examples=["Fitness"])
-    order_item_quantity: int = Field(..., examples=[2])
-    sales: float = Field(..., examples=[199.99])
-    benefit_per_order: float = Field(..., examples=[35.0])
-    category_name: str = Field(..., examples=["Cleats"])
+# ── Batch predict ──────────────────────────────────────────────────────────────
+
+class OrderFeatures(BaseModel):
+    """Feature set for a single order."""
+    days_for_shipping_scheduled: int   = Field(..., examples=[4])
+    shipping_mode:               str   = Field(..., examples=["Standard Class"])
+    order_status:                str   = Field(..., examples=["PENDING"])
+    customer_segment:            str   = Field(..., examples=["Consumer"])
+    market:                      str   = Field(..., examples=["Europe"])
+    order_region:                str   = Field(..., examples=["Western Europe"])
+    department_name:             str   = Field(..., examples=["Fitness"])
+    order_item_quantity:         int   = Field(..., examples=[2])
+    sales:                       float = Field(..., examples=[199.99])
+    benefit_per_order:           float = Field(..., examples=[35.0])
+    category_name:               str   = Field(..., examples=["Cleats"])
 
 
-@app.post("/predict")
-def predict(req: PredictRequest):
+class BatchPredictRequest(BaseModel):
+    """
+    Accepts one or more orders in a single request.
+    """
+    orders: List[OrderFeatures] = Field(..., min_length=1)
+
+
+class OrderPrediction(BaseModel):
+    """Prediction result for one order, at the same index as the input list."""
+    order_index:        int
+    late_delivery_risk: int    # 1 = at risk, 0 = on time
+    probability:        float  # raw model probability
+    risk_level:         str    # "HIGH" | "MEDIUM" | "LOW"
+
+
+@app.post("/predict", response_model=List[OrderPrediction])
+def predict(req: BatchPredictRequest):
+    """
+    Batch prediction endpoint. Accepts 1–N orders and returns one prediction
+    per order at the matching index.
+
+    Request body:
+        { "orders": [ { ...11 fields... }, ... ] }
+
+    Response body:
+        [ { "order_index": 0, "late_delivery_risk": 1, "probability": 0.83, "risk_level": "HIGH" }, ... ]
+    """
     if model is None:
-        raise HTTPException(status_code=503, detail="Modèle non entraîné — lance POST /train d'abord")
+        raise HTTPException(
+            status_code=503,
+            detail="Model not train - launch model first.",
+        )
 
-    df = pd.DataFrame([req.model_dump()])
+    df = pd.DataFrame([order.model_dump() for order in req.orders])
     df = preprocess(df, fit=False)
-    prediction = int(model.predict(df[FEATURES])[0])
-    probability = float(model.predict_proba(df[FEATURES])[0][1])
 
-    return {
-        "late_delivery_risk": prediction,
-        "probability": round(probability, 4),
-        "risk_level": "HIGH" if probability > 0.7 else "MEDIUM" if probability > 0.4 else "LOW",
-    }
+    predictions  = model.predict(df[FEATURES])
+    probabilities = model.predict_proba(df[FEATURES])[:, 1]
+
+    return [
+        OrderPrediction(
+            order_index        = i,
+            late_delivery_risk = int(predictions[i]),
+            probability        = round(float(probabilities[i]), 4),
+            risk_level         = risk_label(float(probabilities[i])),
+        )
+        for i in range(len(req.orders))
+    ]
