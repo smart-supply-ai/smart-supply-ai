@@ -22,6 +22,7 @@ desktop.ini
 .vscode/
 !.vscode/extensions.json
 .idea/
+*.code-workspace
 *.swp
 *.swo
 
