@@ -12,6 +12,8 @@ from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 app = FastAPI(title="ML Service", version="0.2.0")
 
@@ -35,6 +37,27 @@ FEATURES = [
 ]
 TARGET = "late_delivery_risk"
 CATEGORICAL = ["shipping_mode", "order_status", "customer_segment", "market", "order_region", "department_name", "category_name"]
+
+# ── Segmentation ──────────────────────────────────────────────────────────────
+SEGMENT_FEATURES = [
+    "sales",
+    "benefit_per_order",
+    "order_item_quantity",
+    "order_item_discount_rate",
+    "late_delivery_risk",
+    "days_for_shipping_scheduled",
+]
+SEGMENT_CATEGORICAL = ["customer_segment", "market"]
+
+SEGMENT_MODEL_PATH   = "/app/models/segment_model.joblib"
+SEGMENT_SCALER_PATH  = "/app/models/segment_scaler.joblib"
+SEGMENT_ENCODERS_PATH = "/app/models/segment_encoders.joblib"
+SEGMENT_SUMMARY_PATH = "/app/models/segment_summary.joblib"
+
+segment_model   = None
+segment_scaler  = None
+segment_encoders: Dict[str, LabelEncoder] = {}
+segment_summary: Dict = {}
 
 model = None #Can be RandomForest or XGBoost
 model_name: str = "none" #To know which model is active
@@ -96,21 +119,35 @@ def preprocess(df: pd.DataFrame, fit: bool = False) -> pd.DataFrame:
 @app.on_event("startup")
 def on_startup():
     global model, encoders, model_name
+    global segment_model, segment_scaler, segment_encoders, segment_summary
+
     os.makedirs("/app/models", exist_ok=True)
     wait_for_dependency(DATA_SERVICE_URL, timeout_s=90)
+
+    # Charge le modèle de prédiction
     if os.path.exists(MODEL_PATH) and os.path.exists(ENCODERS_PATH):
         model = joblib.load(MODEL_PATH)
         encoders = joblib.load(ENCODERS_PATH)
         if os.path.exists(MODEL_NAME_PATH):
             with open(MODEL_NAME_PATH) as f:
                 model_name = f.read().strip()
-        print(f"✅ Model loaded : {model_name}")
+        print(f"✅ Prediction model loaded : {model_name}")
     else:
-        print("ℹ️  No model — Auto training...")
+        print("ℹ️  No prediction model — Auto training...")
         try:
             train()
         except Exception as e:
             print(f"⚠️  Training failed: {e}")
+
+    # Charge le modèle de segmentation
+    if os.path.exists(SEGMENT_MODEL_PATH):
+        segment_model   = joblib.load(SEGMENT_MODEL_PATH)
+        segment_scaler  = joblib.load(SEGMENT_SCALER_PATH)
+        segment_encoders = joblib.load(SEGMENT_ENCODERS_PATH)
+        segment_summary = joblib.load(SEGMENT_SUMMARY_PATH)
+        print("✅ Segmentation model loaded")
+    else:
+        print("ℹ️  No segmentation model — launching POST /segment/train")
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -299,3 +336,125 @@ def predict(req: BatchPredictRequest):
         )
         for i in range(len(req.orders))
     ]
+
+    # ── Segmentation endpoints ────────────────────────────────────────────────────
+
+@app.post("/segment/train")
+def train_segmentation(n_clusters: int = 4):
+    """
+    Entraîne un modèle KMeans pour segmenter les clients.
+    n_clusters : nombre de segments souhaité (défaut: 4)
+    """
+    global segment_model, segment_scaler, segment_encoders, segment_summary
+
+    # 1. Récupération des données
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            r = client.get(f"{DATA_SERVICE_URL}/data/segments")
+            r.raise_for_status()
+        df = pd.DataFrame(r.json()["data"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"data-service error : {e}")
+
+    # 2. Encodage des colonnes catégorielles
+    seg_encoders = {}
+    for col in SEGMENT_CATEGORICAL:
+        le = LabelEncoder()
+        df[col] = le.fit_transform(df[col].astype(str))
+        seg_encoders[col] = le
+
+    # 3. Nettoyage
+    df = df[SEGMENT_FEATURES + SEGMENT_CATEGORICAL].dropna()
+
+    all_features = SEGMENT_FEATURES + SEGMENT_CATEGORICAL
+
+    # 4. Normalisation (KMeans est sensible aux échelles)
+    scaler = StandardScaler()
+    X = scaler.fit_transform(df[all_features])
+
+    # 5. Entraînement KMeans
+    km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    df["segment"] = km.fit_predict(X)
+
+    # 6. Calcul du résumé par segment
+    summary = {}
+    for seg_id in range(n_clusters):
+        seg_df = df[df["segment"] == seg_id]
+        summary[str(seg_id)] = {
+            "size":                      int(len(seg_df)),
+            "pct":                       round(len(seg_df) / len(df) * 100, 1),
+            "avg_sales":                 round(float(seg_df["sales"].mean()), 2),
+            "avg_benefit":               round(float(seg_df["benefit_per_order"].mean()), 2),
+            "avg_quantity":              round(float(seg_df["order_item_quantity"].mean()), 2),
+            "avg_discount_rate":         round(float(seg_df["order_item_discount_rate"].mean()), 4),
+            "late_delivery_rate":        round(float(seg_df["late_delivery_risk"].mean()), 4),
+            "avg_shipping_scheduled":    round(float(seg_df["days_for_shipping_scheduled"].mean()), 2),
+        }
+
+    # 7. Sauvegarde
+    segment_model   = km
+    segment_scaler  = scaler
+    segment_encoders = seg_encoders
+    segment_summary = summary
+
+    joblib.dump(segment_model,    SEGMENT_MODEL_PATH)
+    joblib.dump(segment_scaler,   SEGMENT_SCALER_PATH)
+    joblib.dump(segment_encoders, SEGMENT_ENCODERS_PATH)
+    joblib.dump(segment_summary,  SEGMENT_SUMMARY_PATH)
+
+    return {
+        "status":     "success",
+        "n_clusters": n_clusters,
+        "total_rows": len(df),
+        "segments":   summary,
+    }
+
+
+@app.get("/segment/summary")
+def get_segment_summary():
+    """Retourne le résumé des segments entraînés."""
+    if not segment_summary:
+        raise HTTPException(
+            status_code=503,
+            detail="Segementation Model not trained — launch POST /segment/train"
+        )
+    return {"status": "success", "segments": segment_summary}
+
+
+class SegmentRequest(BaseModel):
+    customer_segment:            str   = Field(..., examples=["Consumer"])
+    market:                      str   = Field(..., examples=["Europe"])
+    sales:                       float = Field(..., examples=[199.99])
+    benefit_per_order:           float = Field(..., examples=[35.0])
+    order_item_quantity:         int   = Field(..., examples=[2])
+    order_item_discount_rate:    float = Field(..., examples=[0.05])
+    late_delivery_risk:          int   = Field(..., examples=[0])
+    days_for_shipping_scheduled: int   = Field(..., examples=[4])
+
+
+@app.post("/segment/predict")
+def predict_segment(req: SegmentRequest):
+    """Assigne un client à un segment."""
+    if segment_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Segmentation Model not trained — launch POST /segment/train"
+        )
+
+    df = pd.DataFrame([req.model_dump()])
+
+    # Encodage
+    for col in SEGMENT_CATEGORICAL:
+        le = segment_encoders[col]
+        df[col] = df[col].astype(str).map(
+            lambda x, le=le: le.transform([x])[0] if x in le.classes_ else 0
+        )
+
+    all_features = SEGMENT_FEATURES + SEGMENT_CATEGORICAL
+    X = segment_scaler.transform(df[all_features])
+    seg_id = int(segment_model.predict(X)[0])
+
+    return {
+        "segment_id":  seg_id,
+        "segment_info": segment_summary.get(str(seg_id), {}),
+    }
