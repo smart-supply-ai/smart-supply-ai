@@ -33,11 +33,32 @@ def health():
     return {"status": "ok", "service": "data-service"}
 
 @app.get("/data")
-def get_data():
+def get_data(
+    market: str = Query(default=None, description="Filtrer par marché"),
+    order_status: str = Query(default=None, description="Filtrer par statut"),
+    late_delivery_risk: int = Query(default=None, description="0 ou 1"),
+    limit: int = Query(default=10, ge=1, le=100, description="Nombre de lignes"),
+):
     try:
         with psycopg.connect(CONN_STR) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT * FROM supply_chain_data LIMIT 10")
+                filters = []
+                params = []
+
+                if market:
+                    filters.append("market = %s")
+                    params.append(market)
+                if order_status:
+                    filters.append("order_status = %s")
+                    params.append(order_status)
+                if late_delivery_risk is not None:
+                    filters.append("late_delivery_risk = %s")
+                    params.append(late_delivery_risk)
+
+                where = f"WHERE {' AND '.join(filters)}" if filters else ""
+                params.append(limit)
+
+                cur.execute(f"SELECT * FROM supply_chain_data {where} LIMIT %s", params)
                 columns = [desc[0] for desc in cur.description]
                 results = [dict(zip(columns, row)) for row in cur.fetchall()]
                 return {"status": "success", "count": len(results), "data": results}
@@ -134,7 +155,7 @@ def get_sample_data(
             status_code=500,
             detail=f"Unexpected error: {e}"
         )
-        
+
 @app.get("/data/segments")
 def get_segment_data():
     """Retourne les features nécessaires pour la segmentation clients."""
@@ -158,3 +179,78 @@ def get_segment_data():
                 return {"status": "success", "count": len(results), "data": results}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+@app.get("/stats")
+def get_stats():
+    """Retourne les statistiques globales pour le dashboard."""
+    try:
+        with psycopg.connect(CONN_STR) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        COUNT(*)                                    AS total_orders,
+                        SUM(late_delivery_risk)                     AS at_risk_orders,
+                        AVG(days_for_shipping_real - 
+                            days_for_shipping_scheduled)            AS avg_delay_days,
+                        AVG(CASE WHEN late_delivery_risk = 0 
+                            THEN 1.0 ELSE 0.0 END)                  AS on_time_rate
+                    FROM supply_chain_data
+                """)
+                row = cur.fetchone()
+                return {
+                    "status":        "success",
+                    "total_orders":  int(row[0]),
+                    "at_risk_orders": int(row[1]),
+                    "avg_delay_days": round(float(row[2]), 1) if row[2] else 0.0,
+                    "on_time_rate":   round(float(row[3]) * 100, 1) if row[3] else 0.0,
+                }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/by-market")
+def get_stats_by_market():
+    """Stats de retard groupées par marché."""
+    try:
+        with psycopg.connect(CONN_STR) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        market,
+                        COUNT(*)                                        AS total_orders,
+                        SUM(late_delivery_risk)                         AS at_risk_orders,
+                        ROUND(AVG(late_delivery_risk::numeric) * 100, 1) AS late_delivery_rate
+                    FROM supply_chain_data
+                    GROUP BY market
+                    ORDER BY late_delivery_rate DESC
+                """)
+                columns = [desc[0] for desc in cur.description]
+                results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                return {"status": "success", "data": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/by-shipping-mode")
+def get_stats_by_shipping_mode():
+    """Stats de retard groupées par mode d'expédition."""
+    try:
+        with psycopg.connect(CONN_STR) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        shipping_mode,
+                        COUNT(*)                                        AS total_orders,
+                        SUM(late_delivery_risk)                         AS at_risk_orders,
+                        ROUND(AVG(late_delivery_risk::numeric) * 100, 1) AS late_delivery_rate,
+                        ROUND(AVG(days_for_shipping_real::numeric), 1)   AS avg_real_days,
+                        ROUND(AVG(days_for_shipping_scheduled::numeric), 1) AS avg_scheduled_days
+                    FROM supply_chain_data
+                    GROUP BY shipping_mode
+                    ORDER BY late_delivery_rate DESC
+                """)
+                columns = [desc[0] for desc in cur.description]
+                results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                return {"status": "success", "data": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
