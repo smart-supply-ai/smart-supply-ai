@@ -86,7 +86,8 @@ def get_sample_data(
                            shipping_mode, order_status, customer_segment,
                            market, order_region, department_name,
                            order_item_quantity, sales, benefit_per_order,
-                           category_name
+                           category_name,
+                           product_name, order_city, order_country, shipping_date
                     FROM supply_chain_data TABLESAMPLE BERNOULLI(10)
                     LIMIT %s
                 """, (limit,))
@@ -100,7 +101,8 @@ def get_sample_data(
                                shipping_mode, order_status, customer_segment,
                                market, order_region, department_name,
                                order_item_quantity, sales, benefit_per_order,
-                               category_name
+                               category_name,
+                               product_name, order_city, order_country, shipping_date
                         FROM supply_chain_data
                         ORDER BY RANDOM()
                         LIMIT %s

@@ -166,13 +166,18 @@ def run_alerts():
             {
                 "order_index":        pred["order_index"],
                 "risk_level":         pred["risk_level"],
-                "risk_score":         risk_level_to_score(pred["risk_level"]),
+                "risk_score":         int(pred["probability"] * 100),  # ← vraie probabilité
                 "probability":        pred["probability"],
                 "late_delivery_risk": pred["late_delivery_risk"],
+                # Métadonnées de la commande
+                "product_name":       orders[pred["order_index"]].get("product_name", "N/A"),
+                "order_city":         orders[pred["order_index"]].get("order_city", "N/A"),
+                "order_country":      orders[pred["order_index"]].get("order_country", "N/A"),
+                "shipping_date":      orders[pred["order_index"]].get("shipping_date", "N/A"),
             }
-            for pred in predictions
-            if pred["late_delivery_risk"] == 1
-        ]
+        for pred in predictions
+        if pred["late_delivery_risk"] == 1
+    ]
 
     return {
         "service":         "alert-service",
