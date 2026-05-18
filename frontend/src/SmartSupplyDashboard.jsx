@@ -1,6 +1,5 @@
-import { useState } from "react";
 import { runPrediction } from "./services/alertService";
-
+import { useState, useEffect } from "react";
 // ─────────────────────────────────────────────
 // MOCK DATA
 // Used as a fallback while the real API isn't connected yet.
@@ -56,27 +55,6 @@ const MOCK_ORDERS = [
   },
 ];
 
-const SUMMARY_STATS = [
-  { label: "Orders Analyzed", value: "1,284", icon: "📦", delta: "+38 today" },
-  {
-    label: "At-Risk Orders",
-    value: "47",
-    icon: "⚠️",
-    delta: "+5 since yesterday",
-  },
-  {
-    label: "Avg. Delay (days)",
-    value: "3.2",
-    icon: "🕐",
-    delta: "+0.4 this week",
-  },
-  {
-    label: "On-Time Rate",
-    value: "94.6%",
-    icon: "✅",
-    delta: "-0.3% this week",
-  },
-];
 
 // ─────────────────────────────────────────────
 // COMPONENT: Header
@@ -126,9 +104,61 @@ function SummaryCard({ label, value, icon, delta }) {
 // Lays out four SummaryCards in a grid row.
 // ─────────────────────────────────────────────
 function SummaryBar() {
+  const [stats, setStats] = useState({
+    total_orders: "—",
+    at_risk_orders: "—",
+    avg_delay_days: "—",
+    on_time_rate: "—",
+  });
+
+  useEffect(() => {
+    fetch("/api/data/stats")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.status === "success") {
+          setStats({
+            total_orders:   data.total_orders.toLocaleString(),
+            at_risk_orders: data.at_risk_orders.toLocaleString(),
+            avg_delay_days: data.avg_delay_days,
+            on_time_rate:   data.on_time_rate + "%",
+          });
+        }
+      })
+      .catch(() => {
+        // Fallback silencieux si l'API est indisponible
+      });
+  }, []);
+
+  const cards = [
+    {
+      label: "Orders Analyzed",
+      value: stats.total_orders,
+      icon: "📦",
+      delta: "Total in database",
+    },
+    {
+      label: "At-Risk Orders",
+      value: stats.at_risk_orders,
+      icon: "⚠️",
+      delta: "Late delivery risk = 1",
+    },
+    {
+      label: "Avg. Delay (days)",
+      value: stats.avg_delay_days,
+      icon: "🕐",
+      delta: "Real vs scheduled",
+    },
+    {
+      label: "On-Time Rate",
+      value: stats.on_time_rate,
+      icon: "✅",
+      delta: "Orders delivered on time",
+    },
+  ];
+
   return (
     <section style={styles.summaryBar}>
-      {SUMMARY_STATS.map((stat) => (
+      {cards.map((stat) => (
         <SummaryCard key={stat.label} {...stat} />
       ))}
     </section>

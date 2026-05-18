@@ -207,7 +207,10 @@ def get_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
+@app.get("/data/stats")
+def get_data_stats():
+    return get_stats()
+    
 @app.get("/stats/by-market")
 def get_stats_by_market():
     """Stats de retard groupées par marché."""
