@@ -1,10 +1,30 @@
 import os
 import time
 from typing import Optional
-
+from collections import defaultdict
 import httpx
 from fastapi import FastAPI, HTTPException
 import psycopg
+import logging
+import json
+from datetime import datetime
+
+# ── Logging structuré ─────────────────────────────────────────────────────────
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({
+            "timestamp": datetime.utcnow().isoformat(),
+            "level":     record.levelname,
+            "service":   "alert-service",
+            "message":   record.getMessage(),
+        })
+
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logger = logging.getLogger("alert-service")
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
 
 DB_USER = os.getenv("POSTGRES_USER", "postgres")
 DB_PASS = os.getenv("POSTGRES_PASSWORD", "postgres")
@@ -190,7 +210,7 @@ def run_alerts():
         try:
             save_alerts(alerts, orders)
         except Exception as e:
-            print(f"⚠️ Failed to save alerts: {e}")
+            logger.info(f"⚠️ Failed to save alerts: {e}")
 
     return {
         "service":         "alert-service",
@@ -250,3 +270,31 @@ def get_alerts_history(limit: int = 100):
                 }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+request_counts: dict = defaultdict(int)
+error_counts:   dict = defaultdict(int)
+
+@app.middleware("http")
+async def count_requests(request, call_next):
+    import time
+    start = time.time()
+    response = await call_next(request)
+    duration = round(time.time() - start, 4)
+    
+    endpoint = request.url.path
+    request_counts[endpoint] += 1
+    if response.status_code >= 400:
+        error_counts[endpoint] += 1
+    
+    logger.info(f"HTTP {request.method} {endpoint} {response.status_code} {duration}s")
+    return response
+
+
+@app.get("/metrics")
+def get_metrics():
+    return {
+        "service":        "alert-service",
+        "request_counts": dict(request_counts),
+        "error_counts":   dict(error_counts),
+    }

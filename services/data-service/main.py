@@ -1,6 +1,28 @@
 from fastapi import FastAPI, HTTPException, Query
 import psycopg
 import os
+import logging
+import json
+from datetime import datetime
+from collections import defaultdict
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({
+            "timestamp": datetime.utcnow().isoformat(),
+            "level":     record.levelname,
+            "service":   "data-service",
+            "message":   record.getMessage(),
+        })
+
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logger = logging.getLogger("data-service")
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+request_counts: dict = defaultdict(int)
+error_counts:   dict = defaultdict(int)
 
 app = FastAPI()
 
@@ -257,3 +279,24 @@ def get_stats_by_shipping_mode():
                 return {"status": "success", "data": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.middleware("http")
+async def count_requests(request, call_next):
+    import time
+    start = time.time()
+    response = await call_next(request)
+    duration = round(time.time() - start, 4)
+    endpoint = request.url.path
+    request_counts[endpoint] += 1
+    if response.status_code >= 400:
+        error_counts[endpoint] += 1
+    logger.info(f"HTTP {request.method} {endpoint} {response.status_code} {duration}s")
+    return response
+
+@app.get("/metrics")
+def get_metrics():
+    return {
+        "service":        "data-service",
+        "request_counts": dict(request_counts),
+        "error_counts":   dict(error_counts),
+    }

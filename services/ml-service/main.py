@@ -1,6 +1,7 @@
 import os
 import time
 from typing import Any, Dict, Optional, List
+from collections import defaultdict
 
 import httpx
 import joblib
@@ -14,6 +15,25 @@ from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+import logging
+import json
+from datetime import datetime
+
+# ── Logging structuré ─────────────────────────────────────────────────────────
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({
+            "timestamp": datetime.utcnow().isoformat(),
+            "level":     record.levelname,
+            "service":   "ml-service",
+            "message":   record.getMessage(),
+        })
+
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logger = logging.getLogger("ml-service")
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 app = FastAPI(title="ML Service", version="0.2.0")
 
@@ -131,13 +151,13 @@ def on_startup():
         if os.path.exists(MODEL_NAME_PATH):
             with open(MODEL_NAME_PATH) as f:
                 model_name = f.read().strip()
-        print(f"✅ Prediction model loaded : {model_name}")
+        logger.info(f"✅ Prediction model loaded : {model_name}")
     else:
-        print("ℹ️  No prediction model — Auto training...")
+        logger.info("ℹ️  No prediction model — Auto training...")
         try:
             train()
         except Exception as e:
-            print(f"⚠️  Training failed: {e}")
+            logger.error(f"⚠️  Training failed: {e}")
 
     # Charge le modèle de segmentation
     if os.path.exists(SEGMENT_MODEL_PATH):
@@ -145,9 +165,9 @@ def on_startup():
         segment_scaler  = joblib.load(SEGMENT_SCALER_PATH)
         segment_encoders = joblib.load(SEGMENT_ENCODERS_PATH)
         segment_summary = joblib.load(SEGMENT_SUMMARY_PATH)
-        print("✅ Segmentation model loaded")
+        logger.info("✅ Segmentation model loaded")
     else:
-        print("ℹ️  No segmentation model — launching POST /segment/train")
+        logger.info("ℹ️  No segmentation model — launching POST /segment/train")
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -243,7 +263,7 @@ def train():
     joblib.dump(encoders, ENCODERS_PATH)
     with open(MODEL_NAME_PATH, "w") as f:
         f.write(model_name)
-
+    logger.info(f"Entraînement terminé — winner: {best_name}, f1: {round(max(rf_f1, xgb_f1), 4)}")
     return {
         "status":       "success",
         "winner":       best_name,
@@ -326,7 +346,7 @@ def predict(req: BatchPredictRequest):
 
     predictions  = model.predict(df[FEATURES])
     probabilities = model.predict_proba(df[FEATURES])[:, 1]
-
+    logger.info(f"Prédiction batch — {len(req.orders)} commandes traitées")
     return [
         OrderPrediction(
             order_index        = i,
@@ -337,7 +357,6 @@ def predict(req: BatchPredictRequest):
         for i in range(len(req.orders))
     ]
 
-    # ── Segmentation endpoints ────────────────────────────────────────────────────
 
 @app.post("/segment/train")
 def train_segmentation(n_clusters: int = 4):
@@ -457,4 +476,35 @@ def predict_segment(req: SegmentRequest):
     return {
         "segment_id":  seg_id,
         "segment_info": segment_summary.get(str(seg_id), {}),
+    }
+
+
+request_counts: dict = defaultdict(int)
+error_counts:   dict = defaultdict(int)
+
+@app.middleware("http")
+async def count_requests(request, call_next):
+    import time
+    start = time.time()
+    response = await call_next(request)
+    duration = round(time.time() - start, 4)
+    
+    endpoint = request.url.path
+    request_counts[endpoint] += 1
+    if response.status_code >= 400:
+        error_counts[endpoint] += 1
+    
+    logger.info(f"HTTP {request.method} {endpoint} {response.status_code} {duration}s")
+    return response
+
+
+@app.get("/metrics")
+def get_metrics():
+    return {
+        "service":        "ml-service",
+        "model_loaded":   model is not None,
+        "model_name":     model_name,
+        "segment_loaded": segment_model is not None,
+        "request_counts": dict(request_counts),
+        "error_counts":   dict(error_counts),
     }
