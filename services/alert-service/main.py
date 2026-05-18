@@ -4,6 +4,14 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException
+import psycopg
+
+DB_USER = os.getenv("POSTGRES_USER", "postgres")
+DB_PASS = os.getenv("POSTGRES_PASSWORD", "postgres")
+DB_NAME = os.getenv("POSTGRES_DB", "smart_supply")
+DB_HOST = "db"
+CONN_STR = f"host={DB_HOST} dbname={DB_NAME} user={DB_USER} password={DB_PASS}"
+
 
 app = FastAPI(title="Alert Service", version="0.1.0")
 
@@ -166,18 +174,23 @@ def run_alerts():
             {
                 "order_index":        pred["order_index"],
                 "risk_level":         pred["risk_level"],
-                "risk_score":         int(pred["probability"] * 100),  # ← vraie probabilité
+                "risk_score":         int(pred["probability"] * 100),
                 "probability":        pred["probability"],
                 "late_delivery_risk": pred["late_delivery_risk"],
-                # Métadonnées de la commande
-                "product_name":       orders[pred["order_index"]].get("product_name", "N/A"),
-                "order_city":         orders[pred["order_index"]].get("order_city", "N/A"),
-                "order_country":      orders[pred["order_index"]].get("order_country", "N/A"),
-                "shipping_date":      orders[pred["order_index"]].get("shipping_date", "N/A"),
+                "product_name":       orders[pred["order_index"]].get("product_name"),
+                "order_city":         orders[pred["order_index"]].get("order_city"),
+                "order_country":      orders[pred["order_index"]].get("order_country"),
+                "shipping_date":      orders[pred["order_index"]].get("shipping_date"),
             }
-        for pred in predictions
-        if pred["late_delivery_risk"] == 1
-    ]
+            for pred in predictions
+            if pred["late_delivery_risk"] == 1
+        ]
+
+        # ── Step 4: Persist alerts ──
+        try:
+            save_alerts(alerts, orders)
+        except Exception as e:
+            print(f"⚠️ Failed to save alerts: {e}")
 
     return {
         "service":         "alert-service",
@@ -185,3 +198,55 @@ def run_alerts():
         "alerts_found":    len(alerts),
         "alerts":          alerts,
     }
+
+def save_alerts(alerts: list[dict], orders: list[dict]) -> None:
+    """Sauvegarde les alertes en base de données."""
+    if not alerts:
+        return
+    with psycopg.connect(CONN_STR) as conn:
+        with conn.cursor() as cur:
+            for alert in alerts:
+                idx = alert["order_index"]
+                order = orders[idx] if idx < len(orders) else {}
+                cur.execute("""
+                    INSERT INTO alerts (
+                        order_index, risk_level, risk_score, probability,
+                        late_delivery_risk, product_name, order_city,
+                        order_country, shipping_date
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    alert["order_index"],
+                    alert["risk_level"],
+                    alert["risk_score"],
+                    alert["probability"],
+                    alert["late_delivery_risk"],
+                    order.get("product_name"),
+                    order.get("order_city"),
+                    order.get("order_country"),
+                    order.get("shipping_date"),
+                ))
+        conn.commit()
+
+@app.get("/alerts/history")
+def get_alerts_history(limit: int = 100):
+    """Retourne l'historique des alertes stockées en DB."""
+    try:
+        with psycopg.connect(CONN_STR) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, created_at, order_index, risk_level, risk_score,
+                           probability, product_name, order_city, order_country,
+                           shipping_date
+                    FROM alerts
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                """, (limit,))
+                columns = [desc[0] for desc in cur.description]
+                results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                return {
+                    "status": "success",
+                    "count":  len(results),
+                    "alerts": results
+                }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
