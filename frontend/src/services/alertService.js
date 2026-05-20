@@ -32,17 +32,17 @@ function normalizeAlerts(alerts, ordersAnalyzed) {
 
     orders: alerts
       .map((alert) => ({
-        // Temporary identifier until real order_id comes from data-service
-        id: `ORD-${alert.order_index}`,
-
-        // These fields will be populated once data-service returns order metadata
-        product: "— pending",
-        destination: "— pending",
-        expectedDelivery: "— pending",
-
-        risk: alert.risk_score,
-        status: RISK_STATUS_MAP[alert.risk_level] ?? "Low",
-        probability: alert.probability,
+          id: `ORD-${alert.order_index}`,
+          product: alert.product_name ?? "— pending",
+          destination: alert.order_city && alert.order_country 
+              ? `${alert.order_city}, ${alert.order_country}` 
+              : "— pending",
+          expectedDelivery: alert.shipping_date 
+              ? new Date(alert.shipping_date).toLocaleDateString("en-US", {month: "short", day: "numeric", year: "numeric"})
+              : "— pending",
+          risk: alert.risk_score,
+          status: RISK_STATUS_MAP[alert.risk_level] ?? "Low",
+          probability: alert.probability,
       }))
       .sort((a, b) => b.risk - a.risk),
   };
