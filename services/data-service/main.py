@@ -117,7 +117,6 @@ def get_sample_data(
 
                 results = [dict(zip(columns, row)) for row in rows]
                 return {"status": "success", "count": len(results), "data": results}
-
     except HTTPException:
         raise
     except psycopg.OperationalError as e:
@@ -135,3 +134,27 @@ def get_sample_data(
             status_code=500,
             detail=f"Unexpected error: {e}"
         )
+        
+@app.get("/data/segments")
+def get_segment_data():
+    """Retourne les features nécessaires pour la segmentation clients."""
+    try:
+        with psycopg.connect(CONN_STR) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 
+                        customer_segment,
+                        market,
+                        late_delivery_risk,
+                        days_for_shipping_scheduled,
+                        sales,
+                        benefit_per_order,
+                        order_item_quantity,
+                        order_item_discount_rate
+                    FROM supply_chain_data
+                """)
+                columns = [desc[0] for desc in cur.description]
+                results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                return {"status": "success", "count": len(results), "data": results}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
