@@ -11,12 +11,14 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
+from xgboost import XGBClassifier
 
 app = FastAPI(title="ML Service", version="0.2.0")
 
 DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://data-service:8000")
 MODEL_PATH = "/app/models/model.joblib"
 ENCODERS_PATH = "/app/models/encoders.joblib"
+MODEL_NAME_PATH = "/app/models/model_name.txt"
 
 FEATURES = [
     "days_for_shipping_scheduled",
@@ -34,7 +36,9 @@ FEATURES = [
 TARGET = "late_delivery_risk"
 CATEGORICAL = ["shipping_mode", "order_status", "customer_segment", "market", "order_region", "department_name", "category_name"]
 
-model: Optional[RandomForestClassifier] = None
+model = None #Can be RandomForest or XGBoost
+model_name: str = "none" #To know which model is active
+
 encoders: Dict[str, LabelEncoder] = {}
 
 
@@ -66,9 +70,9 @@ def fetch_all_data() -> pd.DataFrame:
 
 def preprocess(df: pd.DataFrame, fit: bool = False) -> pd.DataFrame:
     """
-    Encode les colonnes catégorielles.
-    fit=True  → on apprend les encodeurs (à l'entraînement)
-    fit=False → on réutilise les encodeurs existants (à la prédiction)
+    Encode categorical columns.
+    fit=True  → learn the encoders (during training)
+    fit=False → reuse existing encoders (during inference/prediction)
     """
     df = df.copy()
     for col in CATEGORICAL:
@@ -91,23 +95,22 @@ def preprocess(df: pd.DataFrame, fit: bool = False) -> pd.DataFrame:
 
 @app.on_event("startup")
 def on_startup():
-    global model, encoders
+    global model, encoders, model_name
     os.makedirs("/app/models", exist_ok=True)
     wait_for_dependency(DATA_SERVICE_URL, timeout_s=90)
-    # Charge le modèle s'il existe déjà
     if os.path.exists(MODEL_PATH) and os.path.exists(ENCODERS_PATH):
         model = joblib.load(MODEL_PATH)
         encoders = joblib.load(ENCODERS_PATH)
-        print("✅ Modèle chargé depuis le disque")
+        if os.path.exists(MODEL_NAME_PATH):
+            with open(MODEL_NAME_PATH) as f:
+                model_name = f.read().strip()
+        print(f"✅ Model loaded : {model_name}")
     else:
-        print("ℹ️  Aucun modèle trouvé — entraînement automatique en cours...")
+        print("ℹ️  No model — Auto training...")
         try:
-            result = train()
-            print(f"✅ Modèle entraîné automatiquement — accuracy: {result['accuracy']}")
+            train()
         except Exception as e:
-            # Non-fatal: the service starts anyway, /predict will return 503
-            # until the model is trained manually via POST /train.
-            print(f"⚠️  Entraînement automatique échoué: {e}")
+            print(f"⚠️  Training failed: {e}")
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -122,65 +125,105 @@ def ready():
     return {
         "service": "ml-service",
         "model_loaded": model is not None,
+        "model_name": model_name,
         "data_service": DATA_SERVICE_URL,
     }
 
 
 @app.post("/train")
 def train():
-    """Entraîne le modèle sur toutes les données disponibles."""
-    global model, encoders
+    global model, encoders, model_name
 
     # 1. Récupération des données
     try:
         df = fetch_all_data()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Erreur data-service : {e}")
+        raise HTTPException(status_code=502, detail=f"data-service error: {e}")
 
     # 2. Nettoyage
     df = df[FEATURES + [TARGET]].dropna()
     if len(df) < 100:
-        raise HTTPException(status_code=400, detail="Pas assez de données pour entraîner")
+        raise HTTPException(status_code=400, detail="Not enough data")
 
     # 3. Preprocessing
     df = preprocess(df, fit=True)
     X = df[FEATURES]
     y = df[TARGET]
 
-    # 4. Split train/test
+    # 4. Split
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
 
-    # 5. Entraînement
-    clf = RandomForestClassifier(
-        n_estimators=200,        # plus d'arbres = plus stable
-        max_depth=15,            # évite l'overfitting
-        min_samples_split=10,    # noeuds plus robustes
-        min_samples_leaf=4,      # feuilles plus robustes
-        class_weight="balanced", # gère le déséquilibre des classes
+    # 5. Entraînement des deux modèles
+    rf = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=15,
+        min_samples_split=10,
+        min_samples_leaf=4,
+        class_weight="balanced",
         random_state=42,
         n_jobs=-1
     )
-    clf.fit(X_train, y_train)
 
-    # 6. Évaluation
-    y_pred = clf.predict(X_test)
-    report = classification_report(y_test, y_pred, output_dict=True)
+    xgb = XGBClassifier(
+        n_estimators=200,
+        max_depth=6,
+        learning_rate=0.1,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=(y_train == 0).sum() / (y_train == 1).sum(),
+        random_state=42,
+        n_jobs=-1,
+        eval_metric="logloss",
+        verbosity=0,
+    )
 
-    # 7. Sauvegarde
-    model = clf
+    rf.fit(X_train, y_train)
+    xgb.fit(X_train, y_train)
+
+    # 6. Comparaison sur le test set
+    rf_report  = classification_report(y_test, rf.predict(X_test),  output_dict=True)
+    xgb_report = classification_report(y_test, xgb.predict(X_test), output_dict=True)
+
+    rf_f1  = rf_report["1"]["f1-score"]
+    xgb_f1 = xgb_report["1"]["f1-score"]
+
+    # 7. Sélection du meilleur
+    if xgb_f1 >= rf_f1:
+        best_model      = xgb
+        best_report     = xgb_report
+        best_name       = "xgboost"
+    else:
+        best_model      = rf
+        best_report     = rf_report
+        best_name       = "random_forest"
+
+    # 8. Sauvegarde
+    model      = best_model
+    model_name = best_name
     joblib.dump(model, MODEL_PATH)
     joblib.dump(encoders, ENCODERS_PATH)
+    with open(MODEL_NAME_PATH, "w") as f:
+        f.write(model_name)
 
     return {
-        "status": "success",
+        "status":       "success",
+        "winner":       best_name,
         "rows_trained": len(X_train),
-        "rows_tested": len(X_test),
-        "accuracy": round(report["accuracy"], 4),
-        "precision": round(report["1"]["precision"], 4),
-        "recall": round(report["1"]["recall"], 4),
-        "f1_score": round(report["1"]["f1-score"], 4),
+        "rows_tested":  len(X_test),
+        "random_forest": {
+            "accuracy":  round(rf_report["accuracy"], 4),
+            "precision": round(rf_report["1"]["precision"], 4),
+            "recall":    round(rf_report["1"]["recall"], 4),
+            "f1_score":  round(rf_f1, 4),
+        },
+        "xgboost": {
+            "accuracy":  round(xgb_report["accuracy"], 4),
+            "precision": round(xgb_report["1"]["precision"], 4),
+            "recall":    round(xgb_report["1"]["recall"], 4),
+            "f1_score":  round(xgb_f1, 4),
+        },
     }
 
 def risk_label(probability: float) -> str:

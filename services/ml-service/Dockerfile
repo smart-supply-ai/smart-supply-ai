@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir \
     httpx==0.27.2 \
     pandas==2.2.2 \
     scikit-learn==1.5.1 \
-    joblib==1.4.2
+    joblib==1.4.2 \
+    xgboost==2.1.1
 
 COPY main.py /app/main.py
 
