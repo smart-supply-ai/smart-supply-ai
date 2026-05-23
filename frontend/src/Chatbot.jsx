@@ -11,11 +11,22 @@ const initialMessages = [
 
 export default function Chatbot() {
   const [isOpen, setIsOpen] = useState(false);
+  const [isVisible, setIsVisible] = useState(false);
   const [messages, setMessages] = useState(initialMessages);
   const [input, setInput] = useState("");
   const [isWaiting, setIsWaiting] = useState(false);
   const wrapperRef = useRef(null);
   const bottomRef = useRef(null);
+
+  function openChatbot() {
+    setIsVisible(true);
+    requestAnimationFrame(() => setIsOpen(true));
+  }
+
+  function closeChatbot() {
+    setIsOpen(false);
+    setTimeout(() => setIsVisible(false), 220);
+  }
 
   useEffect(() => {
     function handleClickOutside(event) {
@@ -24,7 +35,7 @@ export default function Chatbot() {
         wrapperRef.current &&
         !wrapperRef.current.contains(event.target)
       ) {
-        setIsOpen(false);
+        closeChatbot();
       }
     }
 
@@ -87,8 +98,13 @@ export default function Chatbot() {
 
   return (
     <div ref={wrapperRef} style={styles.wrapper}>
-      {isOpen ? (
-        <section style={styles.chatWindow}>
+      {isVisible ? (
+        <section
+          style={{
+            ...styles.chatWindow,
+            ...(isOpen ? styles.chatWindowOpen : styles.chatWindowClosed),
+          }}
+        >
           <header style={styles.header}>
             <div>
               <h3 style={styles.title}>Supply Chain Assistant</h3>
@@ -96,7 +112,7 @@ export default function Chatbot() {
                 Ask questions about orders, delays, risks, and markets
               </p>
             </div>
-            <button onClick={() => setIsOpen(false)} style={styles.closeButton}>
+            <button onClick={closeChatbot} style={styles.closeButton}>
               ×
             </button>
           </header>
@@ -161,7 +177,7 @@ export default function Chatbot() {
           </form>
         </section>
       ) : (
-        <button onClick={() => setIsOpen(true)} style={styles.floatingButton}>
+        <button onClick={openChatbot} style={styles.floatingButton}>
           💬
         </button>
       )}
@@ -225,6 +241,17 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     overflow: "hidden",
+    transformOrigin: "bottom right",
+    transition: "opacity 220ms ease, transform 220ms ease",
+  },
+  chatWindowOpen: {
+    opacity: 1,
+    transform: "scale(1) translateY(0)",
+  },
+  chatWindowClosed: {
+    opacity: 0,
+    transform: "scale(0.82) translateY(24px)",
+    pointerEvents: "none",
   },
   header: {
     padding: "18px",
