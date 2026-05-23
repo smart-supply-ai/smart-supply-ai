@@ -7,10 +7,15 @@ export default defineConfig({
     port: 3000,
     // In production, nginx handles this routing instead.
     proxy: {
-      "/api": {
+      "/api/alerts": {
         target: "http://localhost:8003",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+      "/api/query": {
+        target: "http://localhost:8004",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/query/, ""),
       },
     },
   },
