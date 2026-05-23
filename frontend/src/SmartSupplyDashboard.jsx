@@ -1,3 +1,4 @@
+import Chatbot from "./Chatbot";
 import { runPrediction } from "./services/alertService";
 import { useState, useEffect } from "react";
 // ─────────────────────────────────────────────
@@ -54,7 +55,6 @@ const MOCK_ORDERS = [
     status: "Low",
   },
 ];
-
 
 // ─────────────────────────────────────────────
 // COMPONENT: Header
@@ -117,10 +117,10 @@ function SummaryBar() {
       .then((data) => {
         if (data.status === "success") {
           setStats({
-            total_orders:   data.total_orders.toLocaleString(),
+            total_orders: data.total_orders.toLocaleString(),
             at_risk_orders: data.at_risk_orders.toLocaleString(),
             avg_delay_days: data.avg_delay_days,
-            on_time_rate:   data.on_time_rate + "%",
+            on_time_rate: data.on_time_rate + "%",
           });
         }
       })
@@ -406,6 +406,7 @@ export default function Dashboard() {
           Smart Supply AI · Powered by predictive ML · Mock data only
         </footer>
       </div>
+      <Chatbot />
     </div>
   );
 }
