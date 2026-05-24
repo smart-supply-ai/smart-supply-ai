@@ -67,9 +67,10 @@ export default function Chatbot() {
       const data = await askQuestion(question);
 
       const answer =
-        data.count === 0
+        data.answer ??
+        (data.count === 0
           ? "I did not find matching records for this question."
-          : formatAnswer(data);
+          : formatAnswer(data));
 
       setMessages((current) => [
         ...current,
