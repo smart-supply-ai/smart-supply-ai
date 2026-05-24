@@ -152,18 +152,18 @@ The chatbot interface is integrated directly into the React dashboard.
 
 ---
 
-## Local Development
+## Local Development & Launch
 
 1. Clone the repository
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/smart-supply-ai/smart-supply-ai.git
 cd smart-supply-ai
 ```
 
 2. Configure environment variables
 
-Create a .env file from .env.example.
+Create a .env file from .env.example (add an anthropic key if you want to use the chatbot feature).
 
 ```env
 POSTGRES_USER=...
